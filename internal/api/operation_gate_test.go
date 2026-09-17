@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/personenrichment"
 	"go.kenn.io/msgvault/internal/query"
@@ -131,6 +132,41 @@ func TestOperationGateMiddlewareGatesMutatingMethods(t *testing.T) {
 			begin, done := gate.counts()
 			assert.Equal(t, 1, begin, "begin calls")
 			assert.Equal(t, 1, done, "done calls")
+		})
+	}
+}
+
+func TestOperationGateMiddlewareSkipsUnauthorizedDelegatedCLIRun(t *testing.T) {
+	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}}
+	for _, tc := range []struct {
+		name    string
+		grant   *agentgrant.Grant
+		command string
+		calls   int
+	}{
+		{name: "draft.create", grant: grant, command: CLIRunDraftReplyCommand, calls: 1},
+		{name: "missing permission", grant: &agentgrant.Grant{}, command: CLIRunDraftReplyCommand},
+		{name: "nil grant", command: CLIRunDraftReplyCommand},
+		{name: "owner command", grant: grant, command: "remove-account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			gate := &recordingOperationGate{allow: true}
+			handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			body, err := json.Marshal(CLIRunRequest{Args: []string{tc.command, "42"}})
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", strings.NewReader(string(body)))
+			req = req.WithContext(context.WithValue(req.Context(), requestSecurityContextKey{}, requestSecurity{
+				auth: requestAuthentication{Mode: AuthModeDelegated, Grant: tc.grant},
+			}))
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			assert.Equal(http.StatusNoContent, resp.Code)
+			begin, done := gate.counts()
+			assert.Equal(tc.calls, begin)
+			assert.Equal(tc.calls, done)
 		})
 	}
 }

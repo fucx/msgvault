@@ -44,9 +44,13 @@ type Grant struct {
 	CreatedAt   time.Time
 }
 
+func (g Grant) HasPermission(p Permission) bool {
+	return slices.Contains(g.Permissions, p)
+}
+
 // Allows returns true only when p is in the grant AND some SourceRef matches Type and Identifier.
 func (g Grant) Allows(p Permission, src SourceRef) bool {
-	if !slices.Contains(g.Permissions, p) {
+	if !g.HasPermission(p) {
 		return false
 	}
 	for _, s := range g.Sources {

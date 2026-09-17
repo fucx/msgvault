@@ -144,6 +144,43 @@ func TestDelegatedCLIRunAdmission(t *testing.T) {
 	})
 }
 
+func TestDelegatedCLIRunRequiresGrantedPermission(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grant *agentgrant.Grant
+		code  int
+		calls int
+	}{
+		{name: "draft.create", grant: &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}}, code: http.StatusOK, calls: 1},
+		{name: "missing permission", grant: &agentgrant.Grant{}, code: http.StatusBadRequest},
+		{name: "nil grant", code: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			runnerCalls := 0
+			stub := &stubSourceStore{}
+			stub.runFunc = func(context.Context, CLIRunRequest, func(CLIRunEvent) error) error {
+				runnerCalls++
+				return nil
+			}
+			srv := &Server{store: stub, logger: testLogger()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", bytes.NewBufferString(`{"args":["draft-reply","42"]}`))
+			req = req.WithContext(context.WithValue(req.Context(), requestSecurityContextKey{}, requestSecurity{
+				auth: requestAuthentication{Mode: AuthModeDelegated, Grant: tc.grant},
+			}))
+			resp := httptest.NewRecorder()
+			srv.handleCLIRun(resp, req)
+			assert.Equal(tc.code, resp.Code)
+			assert.Equal(tc.calls, runnerCalls)
+			if tc.code != http.StatusOK {
+				var response ErrorResponse
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&response))
+				assert.Equal("command_not_allowed", response.Error)
+			}
+		})
+	}
+}
+
 // TestDelegatedGrantScopesSource is the mutation probe for cli_handlers.go:1315.
 // It drives a delegated draft-reply through the real handler against a source
 // that is not in the grant, and asserts the request is refused.
