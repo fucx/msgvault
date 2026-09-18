@@ -187,7 +187,7 @@ export const defaultExploreURLState: ExploreURLState = {
 
 interface ExploreWindow {
   location: Pick<Location, 'href' | 'pathname' | 'search' | 'hash'>;
-  history: Pick<History, 'pushState' | 'replaceState'>;
+  history: Pick<History, 'state' | 'pushState' | 'replaceState'>;
   addEventListener(type: 'popstate', listener: () => void): void;
   removeEventListener(type: 'popstate', listener: () => void): void;
 }
@@ -513,21 +513,88 @@ function normalize(value: unknown): ExploreURLState {
   } as ExploreURLState;
 }
 
+// Fields that only describe one workspace stay out of the link when another
+// workspace is shared; browser history still carries them for Back/Forward.
+const WORKSPACE_FIELDS: Partial<Record<keyof ExploreURLState, ReadonlyArray<ExploreWorkspace>>> = {
+  directoryQuery: ['directory'],
+  directoryContactState: ['directory'],
+  directoryCategory: ['directory'],
+  directoryOrganization: ['directory'],
+  directoryPrimaryChannel: ['directory'],
+  directoryLastContactAfter: ['directory'],
+  directoryLastContactBefore: ['directory'],
+  directorySort: ['directory'],
+  directoryPersonID: ['directory', 'directory_review'],
+  reviewKind: ['directory_review'],
+  identityState: ['directory_review'],
+  relationshipReviewState: ['directory_review'],
+  fileSort: ['files'],
+  fileFilenameQuery: ['files'],
+  fileMIMEFamilies: ['files'],
+  personFilePresentation: ['relationships'],
+  personFileDirections: ['relationships'],
+  identityQuery: ['relationships'],
+  identitySort: ['relationships'],
+  analysisTarget: ['relationships'],
+  selectedIdentifier: ['relationships'],
+  relationshipFacet: ['relationships'],
+  relationshipTarget: ['relationships'],
+  relationshipShowAll: ['relationships'],
+  relationshipFiles: ['relationships'],
+  operationLane: ['operations'],
+  operationKind: ['operations'],
+  operationState: ['operations'],
+  operationStartedFrom: ['operations'],
+  operationStartedBefore: ['operations'],
+  operationRunID: ['operations'],
+  operationStatus: ['operations'],
+  settingsAuthority: ['settings']
+};
+// Keyboard focus and scroll position live only in browser history.
+const SESSION_ONLY_FIELDS = new Set<keyof ExploreURLState>(['activeRow', 'scrollAnchor']);
+
+function sharedDetails(state: ExploreURLState): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(state).filter(([key, value]) => {
+    const field = key as keyof ExploreURLState;
+    if (field === 'schemaVersion' || field === 'workspace' || field === 'searchMode') return false;
+    if (SESSION_ONLY_FIELDS.has(field)) return false;
+    const owners = WORKSPACE_FIELDS[field];
+    if (owners && !owners.includes(state.workspace)) return false;
+    return JSON.stringify(value) !== JSON.stringify(defaultExploreURLState[field]);
+  }));
+}
+
 export function serializeExploreURLState(state: ExploreURLState, baseSearch = ''): string {
   const parameters = new URLSearchParams(baseSearch.startsWith('?') ? baseSearch.slice(1) : baseSearch);
-  parameters.set(STATE_PARAMETER, JSON.stringify(normalize(state)));
+  const normalized = normalize(state);
+  parameters.set('workspace', normalized.workspace);
+  // An explicit mode keeps a shared link independent of browser preferences.
+  parameters.set('mode', normalized.searchMode);
+  const details = sharedDetails(normalized);
+  if (Object.keys(details).length === 0) parameters.delete(STATE_PARAMETER);
+  else parameters.set(STATE_PARAMETER, JSON.stringify({ schemaVersion: normalized.schemaVersion, ...details }));
   return `?${parameters.toString()}`;
+}
+
+function historyEntry(search: string, state: ExploreURLState): { exploreSearch: string; exploreState: unknown } {
+  // History entries must be structured-cloneable, so strip reactive proxies.
+  return { exploreSearch: search, exploreState: JSON.parse(JSON.stringify(state)) };
 }
 
 export function parseExploreURLState(search: string): ExploreURLState {
   const parameters = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
   const encoded = parameters.get(STATE_PARAMETER);
-  if (encoded === null) return freshDefaults();
+  let details: unknown = {};
   try {
-    return normalize(JSON.parse(encoded));
+    if (encoded !== null) details = JSON.parse(encoded);
   } catch {
-    return freshDefaults();
+    // A malformed detail payload must not discard the selected workspace.
   }
+  return normalize({
+    ...(isRecord(details) ? details : {}),
+    ...(parameters.has('workspace') ? { workspace: parameters.get('workspace') } : {}),
+    ...(parameters.has('mode') ? { searchMode: parameters.get('mode') } : {}),
+  });
 }
 
 export class ExploreState {
@@ -696,7 +763,11 @@ export class ExploreState {
   }
 
   private readURLState(): ExploreURLState {
-    const parsed = parseExploreURLState(this.browser.location.search);
+    const history = this.browser.history.state;
+    const parsed = isRecord(history) && history.exploreSearch === this.browser.location.search &&
+      isRecord(history.exploreState)
+      ? normalize(history.exploreState)
+      : parseExploreURLState(this.browser.location.search);
     parsed.searchMode = resolveInitialSearchMode(
       explicitSearchModeFromURL(this.browser.location.search),
       this.preferenceStorage,
@@ -729,8 +800,9 @@ export class ExploreState {
           .map((key) => [key, this.current[key]])
       ) as Partial<ExploreURLState>;
       const priorEntry = normalize({ ...this.committed, ...transient, ...priorFocus });
-      const committedURL = `${this.browser.location.pathname}${serializeExploreURLState(priorEntry, baseSearch)}${this.browser.location.hash}`;
-      this.browser.history.replaceState(null, '', committedURL);
+      const priorSearch = serializeExploreURLState(priorEntry, baseSearch);
+      const committedURL = `${this.browser.location.pathname}${priorSearch}${this.browser.location.hash}`;
+      this.browser.history.replaceState(historyEntry(priorSearch, priorEntry), '', committedURL);
     }
     const next = normalize({ ...this.current, ...effectivePatch });
     // Preserve per-field reactivity: transient scroll/column changes must not
@@ -742,12 +814,14 @@ export class ExploreState {
     for (const key of keysToApply) {
       if (key in next) this.current[key] = next[key];
     }
-    const url = `${this.browser.location.pathname}${serializeExploreURLState(this.current, baseSearch)}${this.browser.location.hash}`;
+    const search = serializeExploreURLState(this.current, baseSearch);
+    const url = `${this.browser.location.pathname}${search}${this.browser.location.hash}`;
+    const history = historyEntry(search, this.current);
     if (mode === 'push') {
-      this.browser.history.pushState(null, '', url);
+      this.browser.history.pushState(history, '', url);
       this.committed = normalize(this.current);
       this.pendingSearchPriorFocus = undefined;
-    } else this.browser.history.replaceState(null, '', url);
+    } else this.browser.history.replaceState(history, '', url);
   }
 }
 
