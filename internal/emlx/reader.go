@@ -31,6 +31,11 @@ type Message struct {
 
 	// OrigMailbox is the original-mailbox value from the plist.
 	OrigMailbox string
+
+	// RestoredAttachments is the number of attachment parts whose
+	// placeholder body was replaced with content from Apple Mail's
+	// sibling Attachments/ directory (see ParseFile).
+	RestoredAttachments int
 }
 
 // Parse parses an .emlx file from its raw bytes.
@@ -80,12 +85,25 @@ func Parse(data []byte) (*Message, error) {
 }
 
 // ParseFile reads and parses an .emlx file from disk.
+//
+// For a Messages/<num>.partial.emlx file, Apple Mail keeps attachment bytes
+// out of the MIME payload and stores them in a sibling Attachments/<num>/
+// directory instead, leaving an X-Apple-Content-Length placeholder in the
+// part header. When that directory exists, ParseFile inlines those files
+// back into Raw as base64 so the message imports with its attachments.
 func ParseFile(path string) (*Message, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("emlx: read %q: %w", path, err)
 	}
-	return Parse(data)
+	msg, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if dir := attachmentsDir(path); dir != "" {
+		msg.Raw, msg.RestoredAttachments = restoreAttachments(msg.Raw, dir)
+	}
+	return msg, nil
 }
 
 // parsePlist extracts metadata from the Apple Mail XML plist.

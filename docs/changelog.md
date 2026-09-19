@@ -192,6 +192,10 @@ See [Web UI](web-ui.md), [TUI](usage/tui.md),
   RFC Message-ID and link unambiguous replies within a source. Re-import and
   rebuild the cache to fill missing IDs in existing Apple Mail archives; see
   [message identifier recovery](usage/importing.md#message-identifiers-and-replies).
+- Apple Mail imports restore the attachments of `.partial.emlx` messages from
+  the sibling `Attachments/` directory where Apple Mail caches them, instead of
+  importing those messages without attachments. The import summary reports how
+  many attachments were restored.
 - Import Apple WhatsApp ChatStorage text, including URL messages, with available
   participant and push names. Contact-number matching requires country codes;
   missing group-participant tables no longer block otherwise usable exports.

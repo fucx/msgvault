@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -692,4 +693,68 @@ func TestImportEmlxDir_CheckpointBlockedOnIngestFailure(t *testing.T) {
 	err = st.DB().QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&total)
 	require.NoError(err, "count messages")
 	require.Equal(3, total, "total messages")
+}
+
+// Apple Mail keeps the attachment bytes of a .partial.emlx in a sibling
+// Attachments/<num>/<part>/ directory. The importer must inline them so the
+// message is stored with its attachment, and report how many it restored.
+func TestImportEmlxDir_PartialAttachmentRestoredFromSiblingDir(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st, tmp := openTestStore(t)
+
+	root := filepath.Join(tmp, "Mail")
+	mboxDir := filepath.Join(root, "Mailboxes", "Test.mbox")
+	msgDir := filepath.Join(mboxDir, "Messages")
+	require.NoError(os.MkdirAll(msgDir, 0700), "mkdir")
+
+	pdf := []byte("%PDF-1.6\n%synthetic invoice\n")
+	raw := strings.Join([]string{
+		"From: Bob <bob@example.com>",
+		"Subject: Invoice with cached attachment",
+		"Message-ID: <msg3@example.com>",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="=-b"`,
+		"",
+		"--=-b",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"see attached",
+		"",
+		"--=-b",
+		"Content-Transfer-Encoding: base64",
+		"Content-Disposition: attachment;",
+		"\tfilename=\"invoice.pdf\"",
+		"Content-Type: application/pdf;",
+		"\tname=\"invoice.pdf\"",
+		fmt.Sprintf("X-Apple-Content-Length: %d", len(pdf)*4/3),
+		"",
+		"",
+		"--=-b--",
+		"",
+	}, "\n")
+	mkEmlx(t, msgDir, "3.partial.emlx", []byte(raw))
+	attDir := filepath.Join(mboxDir, "Attachments", "3", "2")
+	require.NoError(os.MkdirAll(attDir, 0700), "mkdir attachments")
+	require.NoError(os.WriteFile(filepath.Join(attDir, "invoice.pdf"), pdf, 0600), "write pdf")
+
+	summary, err := ImportEmlxDir(
+		context.Background(), st, root, EmlxImportOptions{
+			Identifier:         "alice@example.com",
+			AttachmentsDir:     filepath.Join(tmp, "attachments"),
+			NoResume:           true,
+			CheckpointInterval: 1,
+		},
+	)
+	require.NoError(err, "ImportEmlxDir")
+	assert.Equal(int64(1), summary.MessagesAdded, "MessagesAdded")
+	assert.Equal(int64(1), summary.PartialFiles, "PartialFiles")
+	assert.Equal(int64(1), summary.AttachmentsRestored, "AttachmentsRestored")
+
+	var filename string
+	var size int64
+	err = st.DB().QueryRow(`SELECT filename, size FROM attachments`).Scan(&filename, &size)
+	require.NoError(err, "query attachment")
+	assert.Equal("invoice.pdf", filename)
+	assert.Equal(int64(len(pdf)), size)
 }

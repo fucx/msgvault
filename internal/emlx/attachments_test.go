@@ -1,0 +1,254 @@
+package emlx
+
+import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// writePartial writes Messages/<num>.partial.emlx with the given MIME body
+// and, for each entry in attachments, Attachments/<num>/<partID>/<name>.
+// It returns the path of the .partial.emlx file.
+func writePartial(t *testing.T, root string, num int, mime string, attachments map[string][]byte) string {
+	t.Helper()
+	msgDir := filepath.Join(root, "Messages")
+	require.NoError(t, os.MkdirAll(msgDir, 0o755))
+	path := filepath.Join(msgDir, fmt.Sprintf("%d.partial.emlx", num))
+	data := fmt.Sprintf("%d\n%s", len(mime), mime)
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+
+	for rel, content := range attachments {
+		p := filepath.Join(root, "Attachments", strconv.Itoa(num), filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, content, 0o600))
+	}
+	return path
+}
+
+// placeholderMIME builds a two-part multipart/mixed message the way Apple Mail
+// writes a .partial.emlx: a text body followed by an attachment part whose
+// content is replaced by an X-Apple-Content-Length header and an empty body.
+func placeholderMIME(nl, boundary, filename string, contentLength int) string {
+	lines := []string{
+		"From: alice@example.com",
+		"Subject: Invoice",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="` + boundary + `"`,
+		"",
+		"--" + boundary,
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"Please find the invoice attached.",
+		"",
+		"--" + boundary,
+		"Content-Transfer-Encoding: base64",
+		"Content-Disposition: attachment;",
+		"\tfilename=\"" + filename + "\"",
+		"Content-Type: application/pdf;",
+		"\tname=\"" + filename + "\"",
+		fmt.Sprintf("X-Apple-Content-Length: %d", contentLength),
+		"",
+		"",
+		"--" + boundary + "--",
+		"",
+	}
+	return strings.Join(lines, nl)
+}
+
+func TestParseFile_PartialRestoresAttachmentFromSiblingDir(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	pdf := []byte("%PDF-1.6\n%fake pdf content for testing\n")
+	mime := placeholderMIME("\n", "=-boundary42", "report.pdf", 60)
+	path := writePartial(t, t.TempDir(), 42, mime, map[string][]byte{
+		"2/report.pdf": pdf,
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+
+	raw := string(msg.Raw)
+	assert.NotContains(raw, "X-Apple-Content-Length", "placeholder header must be removed")
+	assert.Contains(raw, base64.StdEncoding.EncodeToString(pdf), "attachment bytes must be inlined as base64")
+	assert.Contains(raw, "Content-Transfer-Encoding: base64")
+	assert.Contains(raw, "Please find the invoice attached.", "text part must be untouched")
+	assert.Equal(1, msg.RestoredAttachments)
+}
+
+func TestParseFile_PartialWithoutAttachmentsDirIsUnchanged(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mime := placeholderMIME("\n", "=-b", "report.pdf", 60)
+	path := writePartial(t, t.TempDir(), 7, mime, nil)
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	assert.Equal(mime, string(msg.Raw), "no Attachments/ dir: bytes must be untouched")
+	assert.Equal(0, msg.RestoredAttachments)
+}
+
+func TestParseFile_PartialMissingFileKeepsPlaceholder(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mime := placeholderMIME("\n", "=-b", "report.pdf", 60)
+	// Attachments/7 exists but holds a file for a different part.
+	path := writePartial(t, t.TempDir(), 7, mime, map[string][]byte{
+		"3/other.bin": []byte("x"),
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	assert.Equal(mime, string(msg.Raw), "missing file: part must stay a placeholder")
+	assert.Equal(0, msg.RestoredAttachments)
+}
+
+func TestParseFile_FullEmlxNextToAttachmentsDirIsNotTouched(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	root := t.TempDir()
+	mime := placeholderMIME("\n", "=-b", "report.pdf", 60)
+	writePartial(t, root, 7, mime, map[string][]byte{"2/report.pdf": []byte("pdf")})
+	// A full .emlx with the same number must never be rewritten.
+	full := filepath.Join(root, "Messages", "7.emlx")
+	require.NoError(os.WriteFile(full, []byte(fmt.Sprintf("%d\n%s", len(mime), mime)), 0o600))
+
+	msg, err := ParseFile(full)
+	require.NoError(err)
+	assert.Equal(mime, string(msg.Raw))
+	assert.Equal(0, msg.RestoredAttachments)
+}
+
+func TestParseFile_PartIndexCountsTopLevelChildrenNotLeaves(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	// mixed -> [ alternative(text/plain, text/html), application/pdf ]
+	// Apple names the pdf's directory "2" (second child of the top-level
+	// multipart), not "3" (third leaf).
+	nl := "\n"
+	lines := []string{
+		"From: alice@example.com",
+		"Subject: Invoice",
+		`Content-Type: multipart/mixed; boundary="outer"`,
+		"",
+		"--outer",
+		`Content-Type: multipart/alternative; boundary="inner"`,
+		"",
+		"--inner",
+		"Content-Type: text/plain",
+		"",
+		"plain body",
+		"--inner",
+		"Content-Type: text/html",
+		"",
+		"<p>html body</p>",
+		"--inner--",
+		"--outer",
+		"Content-Transfer-Encoding: base64",
+		"Content-Disposition: attachment;",
+		"\tfilename=\"invoice.pdf\"",
+		"Content-Type: application/pdf",
+		"X-Apple-Content-Length: 12",
+		"",
+		"",
+		"--outer--",
+		"",
+	}
+	mime := strings.Join(lines, nl)
+	pdf := []byte("%PDF-nested")
+	path := writePartial(t, t.TempDir(), 9, mime, map[string][]byte{
+		"2/invoice.pdf": pdf,
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	raw := string(msg.Raw)
+	assert.Equal(1, msg.RestoredAttachments)
+	assert.Contains(raw, base64.StdEncoding.EncodeToString(pdf))
+	assert.Contains(raw, "<p>html body</p>", "nested parts must be untouched")
+	assert.Contains(raw, "--inner--", "inner boundary must survive")
+}
+
+func TestParseFile_RestoresTwoAttachments(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	nl := "\n"
+	part := func(name string, n int) []string {
+		return []string{
+			"--b",
+			"Content-Transfer-Encoding: base64",
+			"Content-Disposition: attachment;",
+			"\tfilename=\"" + name + "\"",
+			"Content-Type: application/pdf",
+			fmt.Sprintf("X-Apple-Content-Length: %d", n),
+			"",
+			"",
+		}
+	}
+	lines := []string{
+		"From: a@example.com",
+		`Content-Type: multipart/mixed; boundary="b"`,
+		"",
+		"--b",
+		"Content-Type: text/html",
+		"",
+		"<p>two invoices</p>",
+	}
+	lines = append(lines, part("one.pdf", 10)...)
+	lines = append(lines, part("two.pdf", 10)...)
+	lines = append(lines, "--b--", "")
+	mime := strings.Join(lines, nl)
+	one, two := []byte("%PDF-one"), []byte("%PDF-two")
+	path := writePartial(t, t.TempDir(), 11, mime, map[string][]byte{
+		"2/one.pdf": one,
+		"3/two.pdf": two,
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	raw := string(msg.Raw)
+	assert.Equal(2, msg.RestoredAttachments)
+	assert.Contains(raw, base64.StdEncoding.EncodeToString(one))
+	assert.Contains(raw, base64.StdEncoding.EncodeToString(two))
+	assert.NotContains(raw, "X-Apple-Content-Length")
+}
+
+func TestParseFile_PreservesCRLF(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	pdf := []byte("%PDF-crlf")
+	mime := placeholderMIME("\r\n", "=-b", "report.pdf", 12)
+	path := writePartial(t, t.TempDir(), 13, mime, map[string][]byte{
+		"2/report.pdf": pdf,
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	raw := string(msg.Raw)
+	assert.Equal(1, msg.RestoredAttachments)
+	assert.NotContains(strings.ReplaceAll(raw, "\r\n", ""), "\n", "every line ending must stay CRLF")
+	assert.Contains(raw, base64.StdEncoding.EncodeToString(pdf)+"\r\n")
+}
+
+func TestParseFile_PicksSingleFileWhenNameDiffers(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	// Apple may decode the filename differently than the raw header spells
+	// it; with exactly one file in the part directory, use that file.
+	pdf := []byte("%PDF-renamed")
+	mime := placeholderMIME("\n", "=-b", "=?utf-8?Q?Rechnung=5F1.pdf?=", 12)
+	path := writePartial(t, t.TempDir(), 15, mime, map[string][]byte{
+		"2/Rechnung_1.pdf": pdf,
+	})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	assert.Equal(1, msg.RestoredAttachments)
+	assert.Contains(string(msg.Raw), base64.StdEncoding.EncodeToString(pdf))
+}
