@@ -161,22 +161,37 @@ func findBoundary(header []string) string {
 	return ""
 }
 
+// findFilename returns the attachment's filename from the part header, or ""
+// when there is none or when the value is not a plain file name. The header
+// is sender-controlled, so anything with a path separator or a parent
+// reference is rejected here rather than being joined onto a path later.
 func findFilename(header []string) string {
-	if m := filenameRe.FindStringSubmatch(unfold(header)); m != nil {
-		return strings.TrimSpace(m[1])
+	m := filenameRe.FindStringSubmatch(unfold(header))
+	if m == nil {
+		return ""
 	}
-	return ""
+	name := strings.TrimSpace(m[1])
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, `/\`) || name != filepath.Base(name) {
+		return ""
+	}
+	return name
 }
 
 // readAttachment returns the bytes of attDir/<partID>/<name>. When that exact
 // file is absent but the part directory holds exactly one file, that file is
 // used, since Apple Mail stores one file per part and may have decoded the
-// name differently than the raw header spells it.
+// name differently than the raw header spells it. Only files inside the part
+// directory are ever read.
 func readAttachment(attDir, partID, name string) ([]byte, bool) {
 	dir := filepath.Join(attDir, partID)
 	if name != "" {
-		if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
-			return b, true
+		full := filepath.Join(dir, name)
+		if rel, err := filepath.Rel(dir, full); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if b, err := os.ReadFile(full); err == nil {
+				return b, true
+			}
 		}
 	}
 	entries, err := os.ReadDir(dir)

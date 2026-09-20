@@ -252,3 +252,25 @@ func TestParseFile_PicksSingleFileWhenNameDiffers(t *testing.T) {
 	assert.Equal(1, msg.RestoredAttachments)
 	assert.Contains(string(msg.Raw), base64.StdEncoding.EncodeToString(pdf))
 }
+
+func TestParseFile_RejectsPathTraversalInFilename(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	root := t.TempDir()
+	// A file outside the Attachments/ tree that a hostile sender must never
+	// be able to pull into the archive via the filename header.
+	secret := []byte("-----BEGIN PRIVATE KEY----- not for you")
+	require.NoError(os.WriteFile(filepath.Join(root, "secret.txt"), secret, 0o600))
+
+	mime := placeholderMIME("\n", "=-b", "../../../secret.txt", 12)
+	// Attachments/17 exists so the lookup runs, but the part directory holds
+	// nothing, so the single-file fallback cannot kick in either.
+	path := writePartial(t, root, 17, mime, nil)
+	require.NoError(os.MkdirAll(filepath.Join(root, "Attachments", "17", "2"), 0o755))
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	assert.Equal(0, msg.RestoredAttachments)
+	assert.NotContains(string(msg.Raw), base64.StdEncoding.EncodeToString(secret), "traversal filename must not read outside the part directory")
+	assert.Contains(string(msg.Raw), "X-Apple-Content-Length", "placeholder must survive when nothing is restored")
+}
