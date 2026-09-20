@@ -514,7 +514,7 @@ func ImportEmlxDir(
 				continue
 			}
 
-			msg, err := emlx.ParseFile(filePath)
+			msg, err := emlx.ParseFileLimit(filePath, opts.MaxMessageBytes)
 			if err != nil {
 				cp.ErrorsCount++
 				summary.Errors++

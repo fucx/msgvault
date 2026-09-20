@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// DefaultMaxMessageBytes is the bound ParseFile applies to a message after
+// attachment restoration. It matches the importer's default file limit.
+const DefaultMaxMessageBytes int64 = 128 << 20
+
 // applePlaceholderHeader marks an attachment part whose body Apple Mail did
 // not write into the .partial.emlx. The attachment bytes live next to the
 // Messages/ directory instead, under Attachments/<msg>/<part-index>/<name>.
@@ -45,12 +49,17 @@ func attachmentsDir(path string) string {
 
 // restoreAttachments rewrites raw so that every attachment part carrying an
 // X-Apple-Content-Length placeholder gets its body back from attDir.
-// Parts whose file cannot be found are left as they are. All other bytes,
-// including the message's line-ending style, are preserved.
-func restoreAttachments(raw []byte, attDir string) ([]byte, int) {
+// Parts whose file cannot be found are left as they are, and so are parts
+// whose base64-encoded size would push the message past maxBytes. All other
+// bytes, including the message's line-ending style, are preserved.
+func restoreAttachments(raw []byte, attDir string, maxBytes int64) ([]byte, int) {
 	nl := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		nl = "\r\n"
+	}
+	remaining := maxBytes - int64(len(raw))
+	if remaining <= 0 {
+		return raw, 0
 	}
 	lines := strings.Split(string(raw), nl)
 
@@ -91,8 +100,20 @@ func restoreAttachments(raw []byte, attDir string) ([]byte, int) {
 			i = phEnd
 			continue
 		}
-		// Find the attachment file for this part.
-		content, ok := readAttachment(attDir, strconv.Itoa(partIndex), findFilename(header))
+		// Find the attachment file for this part and make sure it fits the
+		// remaining budget before reading a single byte of it.
+		file, size, ok := resolveAttachment(attDir, strconv.Itoa(partIndex), findFilename(header))
+		if ok {
+			if enc := encodedSize(size, len(nl)); enc > remaining {
+				ok = false
+			} else {
+				remaining -= enc
+			}
+		}
+		var content []byte
+		if ok {
+			content, ok = readFile(file)
+		}
 		if !ok {
 			out = append(out, header...)
 			i = phEnd
@@ -178,25 +199,25 @@ func findFilename(header []string) string {
 	return name
 }
 
-// readAttachment returns the bytes of attDir/<partID>/<name>. When that exact
-// file is absent but the part directory holds exactly one file, that file is
-// used, since Apple Mail stores one file per part and may have decoded the
-// name differently than the raw header spells it. Only files inside the part
-// directory are ever read.
-func readAttachment(attDir, partID, name string) ([]byte, bool) {
+// resolveAttachment returns the path and size of attDir/<partID>/<name>
+// without reading it. When that exact file is absent but the part directory
+// holds exactly one file, that file is used, since Apple Mail stores one file
+// per part and may have decoded the name differently than the raw header
+// spells it. Only files inside the part directory are ever resolved.
+func resolveAttachment(attDir, partID, name string) (string, int64, bool) {
 	dir := filepath.Join(attDir, partID)
 	if name != "" {
 		full := filepath.Join(dir, name)
 		if rel, err := filepath.Rel(dir, full); err == nil &&
 			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			if b, err := os.ReadFile(full); err == nil {
-				return b, true
+			if fi, err := os.Stat(full); err == nil && fi.Mode().IsRegular() {
+				return full, fi.Size(), true
 			}
 		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, false
+		return "", 0, false
 	}
 	var files []os.DirEntry
 	for _, e := range entries {
@@ -205,13 +226,30 @@ func readAttachment(attDir, partID, name string) ([]byte, bool) {
 		}
 	}
 	if len(files) != 1 {
-		return nil, false
+		return "", 0, false
 	}
-	b, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
-	if err != nil {
-		return nil, false
+	full := filepath.Join(dir, files[0].Name())
+	fi, err := os.Stat(full)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", 0, false
 	}
-	return b, true
+	return full, fi.Size(), true
+}
+
+func readFile(path string) ([]byte, bool) {
+	b, err := os.ReadFile(path)
+	return b, err == nil
+}
+
+// encodedSize is the number of bytes size raw bytes occupy once base64-encoded
+// in 76-character lines, each terminated by a newline of nlLen bytes.
+func encodedSize(size int64, nlLen int) int64 {
+	enc := int64(base64.StdEncoding.EncodedLen(int(size)))
+	lines := enc / 76
+	if enc%76 != 0 {
+		lines++
+	}
+	return enc + lines*int64(nlLen)
 }
 
 // base64Lines encodes b as RFC 2045 base64 with 76-character lines.

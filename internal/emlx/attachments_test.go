@@ -1,6 +1,7 @@
 package emlx
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -30,6 +31,12 @@ func writePartial(t *testing.T, root string, num int, mime string, attachments m
 		require.NoError(t, os.WriteFile(p, content, 0o600))
 	}
 	return path
+}
+
+// unwrapped returns raw with all line breaks removed, so a base64 payload
+// that Raw wraps at 76 characters can be compared against EncodeToString.
+func unwrapped(raw []byte) string {
+	return strings.NewReplacer("\r\n", "", "\n", "").Replace(string(raw))
 }
 
 // placeholderMIME builds a two-part multipart/mixed message the way Apple Mail
@@ -273,4 +280,82 @@ func TestParseFile_RejectsPathTraversalInFilename(t *testing.T) {
 	assert.Equal(0, msg.RestoredAttachments)
 	assert.NotContains(string(msg.Raw), base64.StdEncoding.EncodeToString(secret), "traversal filename must not read outside the part directory")
 	assert.Contains(string(msg.Raw), "X-Apple-Content-Length", "placeholder must survive when nothing is restored")
+}
+
+func TestParseFileLimit_SkipsAttachmentThatExceedsBudget(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	big := bytes.Repeat([]byte("x"), 4000)
+	mime := placeholderMIME("\n", "=-b", "big.bin", 5334)
+	path := writePartial(t, t.TempDir(), 19, mime, map[string][]byte{
+		"2/big.bin": big,
+	})
+
+	// Budget covers the emlx itself plus a little, but not the 4000-byte file
+	// once base64-encoded.
+	msg, err := ParseFileLimit(path, int64(len(mime))+1000)
+	require.NoError(err)
+	assert.Equal(0, msg.RestoredAttachments)
+	assert.NotContains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(big), "over-budget bytes must not be read")
+	assert.Contains(string(msg.Raw), "X-Apple-Content-Length", "over-budget part must stay a placeholder")
+	assert.Equal(mime, string(msg.Raw))
+}
+
+func TestParseFileLimit_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	nl := "\n"
+	part := func(name string, n int) []string {
+		return []string{
+			"--b",
+			"Content-Transfer-Encoding: base64",
+			"Content-Disposition: attachment;",
+			"\tfilename=\"" + name + "\"",
+			"Content-Type: application/octet-stream",
+			fmt.Sprintf("X-Apple-Content-Length: %d", n),
+			"",
+			"",
+		}
+	}
+	lines := []string{
+		"From: a@example.com",
+		`Content-Type: multipart/mixed; boundary="b"`,
+		"",
+		"--b",
+		"Content-Type: text/plain",
+		"",
+		"two files",
+	}
+	lines = append(lines, part("one.bin", 1334)...)
+	lines = append(lines, part("two.bin", 1334)...)
+	lines = append(lines, "--b--", "")
+	mime := strings.Join(lines, nl)
+	one := bytes.Repeat([]byte("1"), 1000)
+	two := bytes.Repeat([]byte("2"), 1000)
+	path := writePartial(t, t.TempDir(), 21, mime, map[string][]byte{
+		"2/one.bin": one,
+		"3/two.bin": two,
+	})
+
+	// Room for one encoded file (~1370 bytes) but not two.
+	msg, err := ParseFileLimit(path, int64(len(mime))+2000)
+	require.NoError(err)
+	assert.Equal(1, msg.RestoredAttachments)
+	assert.Contains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(one))
+	assert.NotContains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(two))
+	assert.Equal(1, strings.Count(string(msg.Raw), "X-Apple-Content-Length"), "second part keeps its placeholder")
+}
+
+func TestParseFile_DefaultBudgetRestoresOrdinaryAttachment(t *testing.T) {
+	// ParseFile without an explicit limit must still restore a normal-sized
+	// attachment, i.e. the default budget is not zero.
+	require := require.New(t)
+	assert := assert.New(t)
+	pdf := []byte("%PDF-default-budget")
+	mime := placeholderMIME("\n", "=-b", "r.pdf", 28)
+	path := writePartial(t, t.TempDir(), 23, mime, map[string][]byte{"2/r.pdf": pdf})
+
+	msg, err := ParseFile(path)
+	require.NoError(err)
+	assert.Equal(1, msg.RestoredAttachments)
 }

@@ -92,6 +92,17 @@ func Parse(data []byte) (*Message, error) {
 // part header. When that directory exists, ParseFile inlines those files
 // back into Raw as base64 so the message imports with its attachments.
 func ParseFile(path string) (*Message, error) {
+	return ParseFileLimit(path, DefaultMaxMessageBytes)
+}
+
+// ParseFileLimit is ParseFile with an explicit bound on the size of the
+// resulting Raw. Attachments are only restored while the message, with the
+// restored parts base64-encoded, stays within maxBytes; a part that would
+// exceed the remaining budget keeps its placeholder.
+func ParseFileLimit(path string, maxBytes int64) (*Message, error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxMessageBytes
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("emlx: read %q: %w", path, err)
@@ -101,7 +112,7 @@ func ParseFile(path string) (*Message, error) {
 		return nil, err
 	}
 	if dir := attachmentsDir(path); dir != "" {
-		msg.Raw, msg.RestoredAttachments = restoreAttachments(msg.Raw, dir)
+		msg.Raw, msg.RestoredAttachments = restoreAttachments(msg.Raw, dir, maxBytes)
 	}
 	return msg, nil
 }
