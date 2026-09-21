@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/mime"
 )
 
 // writePartial writes Messages/<num>.partial.emlx with the given MIME body
@@ -78,7 +79,7 @@ func TestParseFile_PartialRestoresAttachmentFromSiblingDir(t *testing.T) {
 		"2/report.pdf": pdf,
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 
 	raw := string(msg.Raw)
@@ -89,13 +90,36 @@ func TestParseFile_PartialRestoresAttachmentFromSiblingDir(t *testing.T) {
 	assert.Equal(1, msg.RestoredAttachments)
 }
 
+func TestParseFile_RestoredAttachmentEncoding(t *testing.T) {
+	for _, encoding := range []string{"base64", "quoted-printable", "7bit", ""} {
+		t.Run(encoding, func(t *testing.T) {
+			require := require.New(t)
+			content := []byte("Meeting notes: bring a pen.\n")
+			raw := placeholderMIME("\n", "boundary", "notes.txt", len(content))
+			header := ""
+			if encoding != "" {
+				header = "content-transfer-encoding:\n\t" + encoding + "\n"
+			}
+			raw = strings.Replace(raw, "Content-Transfer-Encoding: base64\n", header, 1)
+			raw = strings.Replace(raw, "application/pdf", "text/plain", 1)
+			path := writePartial(t, t.TempDir(), 3, raw, map[string][]byte{"2/notes.txt": content})
+			msg, err := ParseFile(path, 1<<20)
+			require.NoError(err)
+			parsed, err := mime.Parse(msg.Raw)
+			require.NoError(err)
+			require.Len(parsed.Attachments, 1)
+			assert.Equal(t, content, parsed.Attachments[0].Content)
+		})
+	}
+}
+
 func TestParseFile_PartialWithoutAttachmentsDirIsUnchanged(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	mime := placeholderMIME("\n", "=-b", "report.pdf", 60)
 	path := writePartial(t, t.TempDir(), 7, mime, nil)
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	assert.Equal(mime, string(msg.Raw), "no Attachments/ dir: bytes must be untouched")
 	assert.Equal(0, msg.RestoredAttachments)
@@ -110,7 +134,7 @@ func TestParseFile_PartialMissingFileKeepsPlaceholder(t *testing.T) {
 		"3/other.bin": []byte("x"),
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	assert.Equal(mime, string(msg.Raw), "missing file: part must stay a placeholder")
 	assert.Equal(0, msg.RestoredAttachments)
@@ -126,7 +150,7 @@ func TestParseFile_FullEmlxNextToAttachmentsDirIsNotTouched(t *testing.T) {
 	full := filepath.Join(root, "Messages", "7.emlx")
 	require.NoError(os.WriteFile(full, []byte(fmt.Sprintf("%d\n%s", len(mime), mime)), 0o600))
 
-	msg, err := ParseFile(full)
+	msg, err := ParseFile(full, 1<<20)
 	require.NoError(err)
 	assert.Equal(mime, string(msg.Raw))
 	assert.Equal(0, msg.RestoredAttachments)
@@ -173,7 +197,7 @@ func TestParseFile_PartIndexCountsTopLevelChildrenNotLeaves(t *testing.T) {
 		"2/invoice.pdf": pdf,
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	raw := string(msg.Raw)
 	assert.Equal(1, msg.RestoredAttachments)
@@ -217,7 +241,7 @@ func TestParseFile_RestoresTwoAttachments(t *testing.T) {
 		"3/two.pdf": two,
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	raw := string(msg.Raw)
 	assert.Equal(2, msg.RestoredAttachments)
@@ -235,7 +259,7 @@ func TestParseFile_PreservesCRLF(t *testing.T) {
 		"2/report.pdf": pdf,
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	raw := string(msg.Raw)
 	assert.Equal(1, msg.RestoredAttachments)
@@ -254,7 +278,7 @@ func TestParseFile_PicksSingleFileWhenNameDiffers(t *testing.T) {
 		"2/Rechnung_1.pdf": pdf,
 	})
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	assert.Equal(1, msg.RestoredAttachments)
 	assert.Contains(string(msg.Raw), base64.StdEncoding.EncodeToString(pdf))
@@ -275,14 +299,14 @@ func TestParseFile_RejectsPathTraversalInFilename(t *testing.T) {
 	path := writePartial(t, root, 17, mime, nil)
 	require.NoError(os.MkdirAll(filepath.Join(root, "Attachments", "17", "2"), 0o755))
 
-	msg, err := ParseFile(path)
+	msg, err := ParseFile(path, 1<<20)
 	require.NoError(err)
 	assert.Equal(0, msg.RestoredAttachments)
 	assert.NotContains(string(msg.Raw), base64.StdEncoding.EncodeToString(secret), "traversal filename must not read outside the part directory")
 	assert.Contains(string(msg.Raw), "X-Apple-Content-Length", "placeholder must survive when nothing is restored")
 }
 
-func TestParseFileLimit_SkipsAttachmentThatExceedsBudget(t *testing.T) {
+func TestParseFile_SkipsAttachmentThatExceedsBudget(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	big := bytes.Repeat([]byte("x"), 4000)
@@ -293,7 +317,7 @@ func TestParseFileLimit_SkipsAttachmentThatExceedsBudget(t *testing.T) {
 
 	// Budget covers the emlx itself plus a little, but not the 4000-byte file
 	// once base64-encoded.
-	msg, err := ParseFileLimit(path, int64(len(mime))+1000)
+	msg, err := ParseFile(path, int64(len(mime))+1000)
 	require.NoError(err)
 	assert.Equal(0, msg.RestoredAttachments)
 	assert.NotContains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(big), "over-budget bytes must not be read")
@@ -301,7 +325,7 @@ func TestParseFileLimit_SkipsAttachmentThatExceedsBudget(t *testing.T) {
 	assert.Equal(mime, string(msg.Raw))
 }
 
-func TestParseFileLimit_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t *testing.T) {
+func TestParseFile_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	nl := "\n"
@@ -338,24 +362,10 @@ func TestParseFileLimit_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t
 	})
 
 	// Room for one encoded file (~1370 bytes) but not two.
-	msg, err := ParseFileLimit(path, int64(len(mime))+2000)
+	msg, err := ParseFile(path, int64(len(mime))+2000)
 	require.NoError(err)
 	assert.Equal(1, msg.RestoredAttachments)
 	assert.Contains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(one))
 	assert.NotContains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(two))
 	assert.Equal(1, strings.Count(string(msg.Raw), "X-Apple-Content-Length"), "second part keeps its placeholder")
-}
-
-func TestParseFile_DefaultBudgetRestoresOrdinaryAttachment(t *testing.T) {
-	// ParseFile without an explicit limit must still restore a normal-sized
-	// attachment, i.e. the default budget is not zero.
-	require := require.New(t)
-	assert := assert.New(t)
-	pdf := []byte("%PDF-default-budget")
-	mime := placeholderMIME("\n", "=-b", "r.pdf", 28)
-	path := writePartial(t, t.TempDir(), 23, mime, map[string][]byte{"2/r.pdf": pdf})
-
-	msg, err := ParseFile(path)
-	require.NoError(err)
-	assert.Equal(1, msg.RestoredAttachments)
 }

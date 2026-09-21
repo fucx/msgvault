@@ -3,16 +3,13 @@ package emlx
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 )
-
-// DefaultMaxMessageBytes is the bound ParseFile applies to a message after
-// attachment restoration. It matches the importer's default file limit.
-const DefaultMaxMessageBytes int64 = 128 << 20
 
 // applePlaceholderHeader marks an attachment part whose body Apple Mail did
 // not write into the .partial.emlx. The attachment bytes live next to the
@@ -25,8 +22,8 @@ var (
 )
 
 // attachmentsDir returns Apple Mail's Attachments/<num> directory for the
-// message at path, or "" when path is not a Messages/<num>.partial.emlx file
-// or the directory does not exist.
+// message at path, without checking whether the directory exists. It returns
+// "" when path is not a Messages/<num>.partial.emlx file.
 func attachmentsDir(path string) string {
 	base := filepath.Base(path)
 	if !IsPartial(base) {
@@ -40,42 +37,46 @@ func attachmentsDir(path string) string {
 	if filepath.Base(msgDir) != "Messages" {
 		return ""
 	}
-	dir := filepath.Join(filepath.Dir(msgDir), "Attachments", num)
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		return ""
-	}
-	return dir
+	return filepath.Join(filepath.Dir(msgDir), "Attachments", num)
 }
 
-// restoreAttachments rewrites raw so that every attachment part carrying an
-// X-Apple-Content-Length placeholder gets its body back from attDir.
+// RestoreAttachments fills top-level attachment parts carrying an
+// X-Apple-Content-Length placeholder with cached bodies beside messagePath.
 // Parts whose file cannot be found are left as they are, and so are parts
 // whose base64-encoded size would push the message past maxBytes. All other
 // bytes, including the message's line-ending style, are preserved.
-func restoreAttachments(raw []byte, attDir string, maxBytes int64) ([]byte, int) {
+func RestoreAttachments(raw []byte, messagePath string, maxBytes int64) ([]byte, int, error) {
+	if !bytes.Contains(raw, []byte(applePlaceholderHeader)) {
+		return raw, 0, nil
+	}
+	attDir := attachmentsDir(messagePath)
+	if attDir == "" {
+		return raw, 0, nil
+	}
 	nl := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		nl = "\r\n"
 	}
 	remaining := maxBytes - int64(len(raw))
 	if remaining <= 0 {
-		return raw, 0
+		return raw, 0, nil
 	}
 	lines := strings.Split(string(raw), nl)
 
 	// Locate the top-level boundary in the message header.
 	hdrEnd := indexBlank(lines, 0)
 	if hdrEnd < 0 {
-		return raw, 0
+		return raw, 0, nil
 	}
 	boundary := findBoundary(lines[:hdrEnd])
 	if boundary == "" {
-		return raw, 0
+		return raw, 0, nil
 	}
 	open, closeB := "--"+boundary, "--"+boundary+"--"
 
 	var out []string
 	restored := 0
+	var restoreErr error
 	partIndex := 0
 	i := 0
 	for i < len(lines) {
@@ -100,32 +101,40 @@ func restoreAttachments(raw []byte, attDir string, maxBytes int64) ([]byte, int)
 			i = phEnd
 			continue
 		}
-		// Find the attachment file for this part and make sure it fits the
-		// remaining budget before reading a single byte of it.
-		file, size, ok := resolveAttachment(attDir, strconv.Itoa(partIndex), findFilename(header))
-		if ok {
-			if enc := encodedSize(size, len(nl)); enc > remaining {
-				ok = false
-			} else {
-				remaining -= enc
+		// Replace the encoding header, including folded continuations, to
+		// match the base64 body written below.
+		var restoredHeader []string
+		drop := false
+		for _, h := range header {
+			if !strings.HasPrefix(h, " ") && !strings.HasPrefix(h, "\t") {
+				name, _, _ := strings.Cut(h, ":")
+				drop = strings.EqualFold(name, "X-Apple-Content-Length") ||
+					strings.EqualFold(name, "Content-Transfer-Encoding")
+			}
+			if !drop {
+				restoredHeader = append(restoredHeader, h)
 			}
 		}
+		restoredHeader = append(restoredHeader, "Content-Transfer-Encoding: base64")
+		// Find the attachment file for this part and make sure it fits the
+		// remaining budget before reading a single byte of it.
+		file, size, err := resolveAttachment(attDir, strconv.Itoa(partIndex), findFilename(header))
+		headerGrowth := len(strings.Join(restoredHeader, nl)) - len(strings.Join(header, nl))
+		cost := encodedSize(size, len(nl)) + int64(headerGrowth)
 		var content []byte
-		if ok {
-			content, ok = readFile(file)
+		if err == nil && file != "" && cost <= remaining {
+			content, err = os.ReadFile(file)
 		}
-		if !ok {
+		if err != nil || file == "" || cost > remaining {
+			restoreErr = errors.Join(restoreErr, err)
 			out = append(out, header...)
 			i = phEnd
 			continue
 		}
+		remaining -= cost
 		// Emit the header without the placeholder, then the base64 body,
 		// and skip the original (empty) body up to the next boundary line.
-		for _, h := range header {
-			if !strings.HasPrefix(h, applePlaceholderHeader) {
-				out = append(out, h)
-			}
-		}
+		out = append(out, restoredHeader...)
 		out = append(out, "")
 		out = append(out, base64Lines(content)...)
 		i = phEnd + 1
@@ -134,7 +143,7 @@ func restoreAttachments(raw []byte, attDir string, maxBytes int64) ([]byte, int)
 		}
 		restored++
 	}
-	return []byte(strings.Join(out, nl)), restored
+	return []byte(strings.Join(out, nl)), restored, restoreErr
 }
 
 // indexBlank returns the index of the first empty line at or after from.
@@ -203,21 +212,23 @@ func findFilename(header []string) string {
 // without reading it. When that exact file is absent but the part directory
 // holds exactly one file, that file is used, since Apple Mail stores one file
 // per part and may have decoded the name differently than the raw header
-// spells it. Only files inside the part directory are ever resolved.
-func resolveAttachment(attDir, partID, name string) (string, int64, bool) {
+// spells it. name must already have passed findFilename's validation.
+func resolveAttachment(attDir, partID, name string) (string, int64, error) {
 	dir := filepath.Join(attDir, partID)
 	if name != "" {
 		full := filepath.Join(dir, name)
-		if rel, err := filepath.Rel(dir, full); err == nil &&
-			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			if fi, err := os.Stat(full); err == nil && fi.Mode().IsRegular() {
-				return full, fi.Size(), true
-			}
+		if fi, err := os.Stat(full); err == nil && fi.Mode().IsRegular() {
+			return full, fi.Size(), nil
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", 0, err
 		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", 0, false
+		if errors.Is(err, os.ErrNotExist) {
+			return "", 0, nil
+		}
+		return "", 0, err
 	}
 	var files []os.DirEntry
 	for _, e := range entries {
@@ -226,19 +237,14 @@ func resolveAttachment(attDir, partID, name string) (string, int64, bool) {
 		}
 	}
 	if len(files) != 1 {
-		return "", 0, false
+		return "", 0, nil
 	}
 	full := filepath.Join(dir, files[0].Name())
 	fi, err := os.Stat(full)
 	if err != nil || !fi.Mode().IsRegular() {
-		return "", 0, false
+		return "", 0, err
 	}
-	return full, fi.Size(), true
-}
-
-func readFile(path string) ([]byte, bool) {
-	b, err := os.ReadFile(path)
-	return b, err == nil
+	return full, fi.Size(), nil
 }
 
 // encodedSize is the number of bytes size raw bytes occupy once base64-encoded
