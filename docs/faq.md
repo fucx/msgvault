@@ -1,16 +1,20 @@
 ---
-last_edited: 2026-09-08
+last_edited: 2026-09-22
 title: Frequently Asked Questions
 description: Common questions about msgvault, Gmail API safety, and what the tool can and cannot do.
 ---
 
-<p class="faq-question">Can msgvault send email?</p>
+<p class="faq-question">Can msgvault send email or prepare a reply?</p>
 
-No. msgvault archives and analyzes messages; it does not compose, send, forward,
-or reply to mail. Gmail authorization requests `gmail.modify` by default for
-archive and deletion workflows. `add-account --readonly` requests read-only
-access instead. See [read-only Gmail access](guides/oauth-setup.md#read-only-access)
-for existing-account restrictions.
+msgvault never sends email. For an IMAP source, an operator can grant access to
+one exact Drafts folder; `draft-reply` can then create a plain-text reply draft
+for review and sending in your usual mail application. The grant is disabled by
+default. See [IMAP reply drafts](usage/imap.md#reply-drafts).
+
+Gmail authorization requests `gmail.modify` by default for archive and deletion
+workflows. `add-account --readonly` requests read-only access instead. See
+[read-only Gmail access](guides/oauth-setup.md#read-only-access) for
+existing-account restrictions.
 
 <p class="faq-question">What can an AI assistant do through MCP?</p>
 
@@ -40,10 +44,10 @@ features. See [recommended configuration](usage/recommended-configuration.md).
 
 <p class="faq-question">Why is a documented feature missing from my binary?</p>
 
-The documentation follows current `main`, including work after 0.19.3 that is
-not yet released. Check `msgvault version` and the installed command's `--help`,
-then consult [the changelog](changelog.md#unreleased). A configured remote daemon also
-needs a compatible version.
+The documentation follows current `main`; your installed binary may be older.
+Check `msgvault version` and the installed command's `--help`, then consult the
+[0.20.0 changelog](changelog.md#0200). Upgrade the CLI and a configured remote
+daemon together.
 
 <p class="faq-question">What is the web server for?</p>
 

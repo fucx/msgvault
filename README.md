@@ -13,11 +13,11 @@
 
 <p align="center">
   <a href="https://msgvault.io/docs/">Documentation</a> ·
-  <a href="https://msgvault.io/docs/guides/oauth-setup/">Setup Guide</a> ·
+  <a href="https://msgvault.io/docs/setup/">Setup Guide</a> ·
   <a href="https://msgvault.io/docs/usage/tui/">Interactive TUI</a>
 </p>
 
-**The system of record for your communications and relationships.**
+**Keep your communications and relationships in an archive you own.**
 
 msgvault is a local-first, open-source archive for email, chat, meetings,
 calendars, and contacts. Keep your history on your own hardware, find messages
@@ -25,9 +25,8 @@ and files, and connect the addresses and handles that belong to the same person.
 Use the browser, terminal, CLI, HTTP API, or an AI assistant through MCP.
 
 > **Alpha software.** APIs, storage format, and CLI flags may change. Back up
-> your data. This README describes current `main`; see
-> [the changelog](docs/changelog.md#unreleased) for unreleased features
-> and upgrade steps.
+> your data. This README follows current `main`; see the
+> [0.20.0 changelog](docs/changelog.md#0200) for features and upgrade steps.
 
 ## What you can do
 
@@ -55,7 +54,6 @@ servers are also supported. See [recommended configuration](docs/usage/recommend
 for the choices and consent steps.
 
 ## Installation
-
 
 **macOS / Linux:**
 ```bash
@@ -121,7 +119,7 @@ first sync, and running on your own server.
 | I want to… | Read |
 |---|---|
 | Understand the product | [Product overview](https://msgvault.io/) and [archive lifecycle](https://msgvault.io/guide/) |
-| Catch up after 0.19 | [Changelog and upgrade notes](docs/changelog.md#unreleased) |
+| Catch up after 0.19 | [Changelog and upgrade notes](docs/changelog.md#0200) |
 | Search messages and attachments | [Searching](docs/usage/searching.md) and [document indexing](docs/usage/document-indexing.md) |
 | Maintain contacts and relationships | [People and profiles](docs/usage/people.md) |
 | Configure optional AI features | [Recommended configuration](docs/usage/recommended-configuration.md) |

@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-09-08"
+last_edited: "2026-09-22"
 title: Documentation
 description: Set up your archive, find messages and files, maintain people, and operate msgvault.
 ---
@@ -12,14 +12,13 @@ the archive through the browser, terminal, CLI, or an agent.
 
 <p class="hero-actions">
   <a class="md-button md-button--primary" href="/docs/setup/">Get started</a>
-  <a class="md-button" href="/docs/changelog/#unreleased">Changelog</a>
+  <a class="md-button" href="/docs/changelog/#0200">Changelog</a>
 </p>
 
 !!! note "Returning after 0.19?"
-    These docs follow current `main`, including unreleased work after 0.19.3.
-    The [changelog](changelog.md#unreleased) lists new capabilities and
-    [upgrade notes](changelog.md#upgrade-and-compatibility), with released and
-    unreleased changes kept separate.
+    The [0.20.0 changelog](changelog.md#0200) lists the new capabilities.
+    Read the [upgrade notes](changelog.md#upgrade-and-compatibility) before
+    opening an existing archive with the new version.
 
 ## Start an archive
 
@@ -60,6 +59,7 @@ limit an archive view.
 | Verify stored mail | [Archive verification](guides/verification.md) |
 | Hide duplicate copies | [Deduplication](usage/deduplication.md) |
 | Remove mail from a provider | [Deletion staging and execution](usage/deletion.md) |
+| Prepare an email for review in a mail client | [Managed IMAP drafts](usage/imap.md#reply-drafts) |
 | Keep a recoverable copy | [Backup and restore](usage/backup.md) |
 | Take data elsewhere | [Exporting](usage/exporting.md) |
 | Diagnose a problem | [Troubleshooting](troubleshooting.md) and [FAQ](faq.md) |
