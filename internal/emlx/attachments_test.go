@@ -405,3 +405,16 @@ func TestParseFile_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t *tes
 	assert.NotContains(unwrapped(msg.Raw), base64.StdEncoding.EncodeToString(two))
 	assert.Equal(1, strings.Count(string(msg.Raw), "X-Apple-Content-Length"), "second part keeps its placeholder")
 }
+
+func TestFindBoundary_ToleratesWhitespaceAroundEquals(t *testing.T) {
+	assert := assert.New(t)
+	for _, tc := range []struct{ header, want string }{
+		{`Content-Type: multipart/mixed; boundary="=-b"`, "=-b"},
+		{`Content-Type: multipart/mixed; boundary=plain`, "plain"},
+		{`Content-Type: multipart/mixed; boundary = "spaced"`, "spaced"},
+		{`Content-Type: multipart/mixed; boundary= tab`, "tab"},
+		{`Content-Type: multipart/mixed; charset=utf-8; BOUNDARY="upper"`, "upper"},
+	} {
+		assert.Equal(tc.want, findBoundary([]string{tc.header}), tc.header)
+	}
+}

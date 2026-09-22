@@ -18,7 +18,7 @@ import (
 const applePlaceholderHeader = "X-Apple-Content-Length:"
 
 var (
-	boundaryRe = regexp.MustCompile(`(?i)boundary="?([^";\s]+)"?`)
+	boundaryRe = regexp.MustCompile(`(?i)boundary\s*=\s*"?([^";\s]+)"?`)
 	filenameRe = regexp.MustCompile(`(?i)filename="?([^";]+)"?`)
 )
 
