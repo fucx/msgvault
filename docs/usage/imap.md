@@ -265,11 +265,13 @@ Use the current revision from `draft-get` or the last successful operation:
 ```bash
 msgvault draft-edit <draft-id> --revision 1 --body 'Updated text' --json
 msgvault draft-delete <draft-id> --revision 2 --json
+msgvault draft-recover <draft-id> --revision 1 --json
 ```
 
 Edit and delete require the same daemon-host `[[imap.drafts]]` grant and provider
 configuration as draft creation. Policy changes take effect after a daemon
-restart. Neither command sends mail.
+restart. Recovery uses the same policy after it checks the delegated action
+grant. None of these commands sends mail.
 
 Editing supports plain-text drafts without attachments. `--body=` sets an empty
 body. The edit preserves the From, To, Cc, Bcc, Reply-To, Subject, In-Reply-To, and
@@ -303,6 +305,52 @@ Every removal path checks the mailbox generation and requires both `\Draft` and
 `UID EXPUNGE` itself is not conditional, so another client can still change flags
 after the last check.
 
+### Recover an interrupted edit or delete
+
+Recovery uses only the original receipt and a replacement receipt already saved
+on the managed draft row. It checks the requested revision, source type and
+identifier, mailbox UIDVALIDITY, exact UID, and current draft flags before it
+publishes or removes anything. A pending edit without a known replacement
+returns `unknown_replacement` without opening an IMAP connection.
+
+```bash
+msgvault draft-recover <draft-id> --revision 1 --json
+```
+
+If another client already removed the exact original UID, recovery records that
+absence and finishes the Store transition locally. A known unpublished
+replacement is published from its saved bytes, then the original is removed
+with the existing conditional `UID STORE` and `UID EXPUNGE` sequence. Recovery
+never searches a mailbox, adopts a moved copy, calls APPEND, or rolls back a
+publication. Once a replacement is published locally, cleanup of the original
+can finish even if another client has since sent or deleted the replacement.
+Only an unpublished replacement must still be a live draft.
+
+`draft.edit` authorizes active and pending edits. `draft.delete` authorizes
+discarded and pending deletes. A delegated token must also name the exact source
+type and identifier. Wrong actions, sources, or revisions return before draft
+content, policy errors, locks, or provider work are disclosed.
+
+If the original already has `\Deleted`, recovery returns `already_deleted`
+without a provider write. This includes removal interrupted after `UID STORE`
+succeeded. Repeating recovery cannot clear that state: use an IMAP client to
+expunge the exact original UID in the recorded mailbox and UIDVALIDITY, then run
+`draft-recover` with the revision from the recovery output or `draft-get`.
+Recovery may have published a replacement locally and advanced the revision
+before cleanup was refused. For a published edit, remove the original
+copy, not the replacement. Check the receipt before expunging; do not purge all
+deleted messages in the mailbox. Saved cancellation evidence does not establish
+who set the flag, so automatic removal of an already-deleted UID is outside this
+command's scope.
+
+If cleanup fails after publication, the new revision and pending evidence stay
+saved. Recovery can retry when the original is still an undeleted draft or is
+confirmed absent; an already-deleted original needs the manual step above.
+A generation or SELECT refusal before `UID STORE` leaves the pending code,
+receipts, timestamp, and revision unchanged. Output keeps the saved
+`pending_code`. Refused results use `refusal_code`; pending cleanup results use
+`observation.code` for the current provider result.
+
 ### If an edit or delete does not finish
 
 - A delete failure before any remote write clears the pending claim. After
@@ -312,11 +360,13 @@ after the last check.
   blocks further changes. Inspect the provider state before any manual
   reconciliation; general recovery for uncertain writes is not available.
 - If `draft-get <draft-id> --json` reports `pending_code: "removed"`, removal was
-  confirmed and saved, but local completion is still pending. Repeat the matching
-  `draft-edit` or `draft-delete` command with the revision from that read to finish
-  locally without another remote write. The source policy still applies. For an
-  edit, `--body` must match the already published replacement after MIME
-  normalization. A `removed` observation in an error response alone is not enough;
+  confirmed and saved, but local completion is still pending. `draft-recover` is
+  the preferred local completion route. Run it with the revision from that
+  read; it finishes locally without another remote write. You can also repeat
+  the matching `draft-edit` or `draft-delete` command with that revision. The
+  source policy still applies. For an edit, `--body` must match the already
+  published replacement after MIME normalization. A `removed` observation in
+  an error response alone is not enough;
   `draft-get` must report the saved pending code.
 
 ## Keep edited outgoing mail current
