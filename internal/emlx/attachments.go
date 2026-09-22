@@ -222,18 +222,21 @@ func findFilename(header []string) string {
 }
 
 // resolveAttachment returns the path and size of attDir/<partID>/<name>
-// without reading it. When that exact file is absent but the part directory
+// without reading it. When the exact name cannot be resolved but the part directory
 // holds exactly one file, that file is used, since Apple Mail stores one file
 // per part and may have decoded the name differently than the raw header
 // spells it. name must already have passed findFilename's validation.
 func resolveAttachment(attDir, partID, name string) (string, int64, error) {
 	dir := filepath.Join(attDir, partID)
+	var nameErr error
 	if name != "" {
 		full := filepath.Join(dir, name)
 		if fi, err := os.Stat(full); err == nil && fi.Mode().IsRegular() {
 			return full, fi.Size(), nil
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", 0, err
+			// Encoded header names can be invalid on the local filesystem.
+			// Try the cached filename before reporting this lookup failure.
+			nameErr = err
 		}
 	}
 	entries, err := os.ReadDir(dir)
@@ -250,7 +253,7 @@ func resolveAttachment(attDir, partID, name string) (string, int64, error) {
 		}
 	}
 	if len(files) != 1 {
-		return "", 0, nil
+		return "", 0, nameErr
 	}
 	full := filepath.Join(dir, files[0].Name())
 	fi, err := os.Stat(full)

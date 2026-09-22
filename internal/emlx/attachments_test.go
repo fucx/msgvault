@@ -268,20 +268,31 @@ func TestParseFile_PreservesCRLF(t *testing.T) {
 }
 
 func TestParseFile_PicksSingleFileWhenNameDiffers(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
 	// Apple may decode the filename differently than the raw header spells
-	// it; with exactly one file in the part directory, use that file.
-	pdf := []byte("%PDF-renamed")
-	mime := placeholderMIME("\n", "=-b", "=?utf-8?Q?Rechnung=5F1.pdf?=", 12)
-	path := writePartial(t, t.TempDir(), 15, mime, map[string][]byte{
-		"2/Rechnung_1.pdf": pdf,
-	})
-
-	msg, err := ParseFile(path, 1<<20)
-	require.NoError(err)
-	assert.Equal(1, msg.RestoredAttachments)
-	assert.Contains(string(msg.Raw), base64.StdEncoding.EncodeToString(pdf))
+	// it. The encoded spelling can be invalid on Windows or exceed the
+	// filesystem's filename limit even when the decoded name is valid.
+	for _, tt := range []struct{ name, encoded, cached string }{
+		{"encoded", "=?utf-8?Q?Rechnung=5F1.pdf?=", "Rechnung_1.pdf"},
+		{"long_encoded", "=?utf-8?Q?" + strings.Repeat("=61", 100) + ".pdf?=", strings.Repeat("a", 100) + ".pdf"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			pdf := []byte("%PDF-renamed")
+			raw := placeholderMIME("\n", "=-b", tt.encoded, 12)
+			path := writePartial(t, t.TempDir(), 15, raw, map[string][]byte{
+				"2/" + tt.cached: pdf,
+			})
+			msg, err := ParseFile(path, 1<<20)
+			require.NoError(err)
+			require.NoError(msg.RestorationError)
+			assert.Equal(1, msg.RestoredAttachments)
+			parsed, err := mime.Parse(msg.Raw)
+			require.NoError(err)
+			require.Len(parsed.Attachments, 1)
+			assert.Equal(pdf, parsed.Attachments[0].Content)
+		})
+	}
 }
 
 func TestParseFile_RejectsPathTraversalInFilename(t *testing.T) {
