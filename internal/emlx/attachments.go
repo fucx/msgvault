@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -116,14 +117,15 @@ func RestoreAttachments(raw []byte, messagePath string, maxBytes int64) ([]byte,
 			}
 		}
 		restoredHeader = append(restoredHeader, "Content-Transfer-Encoding: base64")
-		// Find the attachment file for this part and make sure it fits the
-		// remaining budget before reading a single byte of it.
+		// Skip files already known to exceed the budget, then bound the read
+		// and charge its actual size in case the cache changed after Stat.
 		file, size, err := resolveAttachment(attDir, strconv.Itoa(partIndex), findFilename(header))
 		headerGrowth := len(strings.Join(restoredHeader, nl)) - len(strings.Join(header, nl))
 		cost := encodedSize(size, len(nl)) + int64(headerGrowth)
 		var content []byte
 		if err == nil && file != "" && cost <= remaining {
-			content, err = os.ReadFile(file)
+			content, err = readAttachment(file, remaining-int64(headerGrowth))
+			cost = encodedSize(int64(len(content)), len(nl)) + int64(headerGrowth)
 		}
 		if err != nil || file == "" || cost > remaining {
 			restoreErr = errors.Join(restoreErr, err)
@@ -144,6 +146,17 @@ func RestoreAttachments(raw []byte, messagePath string, maxBytes int64) ([]byte,
 		restored++
 	}
 	return []byte(strings.Join(out, nl)), restored, restoreErr
+}
+
+// readAttachment reads at most maxBytes+1 bytes. The extra byte ensures that
+// truncating an oversized file cannot make its encoded content fit the budget.
+func readAttachment(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, maxBytes+1))
 }
 
 // indexBlank returns the index of the first empty line at or after from.

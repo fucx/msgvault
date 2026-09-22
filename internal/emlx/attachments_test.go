@@ -325,6 +325,42 @@ func TestParseFile_SkipsAttachmentThatExceedsBudget(t *testing.T) {
 	assert.Equal(mime, string(msg.Raw))
 }
 
+func TestReadAttachment_FileChangesAfterSizeCheck(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replace=%t", replace), func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			dir := t.TempDir()
+			partDir := filepath.Join(dir, "2")
+			require.NoError(os.Mkdir(partDir, 0700))
+			path := filepath.Join(partDir, "notes.txt")
+			require.NoError(os.WriteFile(path, []byte("note"), 0600))
+			resolved, size, err := resolveAttachment(dir, "2", "notes.txt")
+			require.NoError(err)
+			require.Equal(int64(4), size)
+
+			// A completed size check cannot prevent a later cache update.
+			larger := bytes.Repeat([]byte("x"), 4096)
+			if replace {
+				replacement := filepath.Join(dir, "replacement")
+				require.NoError(os.WriteFile(replacement, larger, 0600))
+				require.NoError(os.Rename(replacement, path))
+			} else {
+				require.NoError(os.WriteFile(path, larger, 0600))
+			}
+			content, err := readAttachment(resolved, 8)
+			require.NoError(err)
+			require.Len(content, 9, "read only the budget plus one overflow byte")
+			assert.Equal(bytes.Repeat([]byte("x"), 9), content, "read only the budget plus one overflow byte")
+
+			require.NoError(os.WriteFile(path, []byte("12345678"), 0600))
+			content, err = readAttachment(resolved, 8)
+			require.NoError(err)
+			assert.Equal([]byte("12345678"), content, "an attachment that fits is read in full")
+		})
+	}
+}
+
 func TestParseFile_RestoresFirstAttachmentAndSkipsSecondWhenBudgetRunsOut(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
