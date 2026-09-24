@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-09-08"
+last_edited: "2026-09-23"
 title: Beeper
 description: Archive every chat network connected to Beeper Desktop via its local API.
 ---
@@ -177,6 +177,90 @@ FROM attachments a
 JOIN messages m ON m.id = a.message_id
 WHERE m.message_type = 'beeper'
 GROUP BY is_share;
+```
+
+## Send audio to Docbank
+
+The daemon can copy stored Beeper audio to a separately running Docbank media
+service. Docbank keeps the recording, imports Beeper's own transcript, and
+processes it with its `supplied-transcript` profile. msgvault records which
+Docbank source and occurrence belong to each live message. Configure the
+destination in
+[`[integrations.docbank]`](/docs/configuration/#send-beeper-audio-to-docbank).
+
+What you need:
+
+- A Docbank server with the media HTTP routes
+  ([docbank#346](https://github.com/kenn-io/docbank/pull/346)). The Docbank
+  library built into msgvault does not provide them.
+- `upload_consent = true`. It allows transport to that URL only. Docbank's own
+  processing consent decides whether the transcript is processed.
+- WAV or MP3 audio. msgvault checks the bytes and sends them as `audio/wav` or
+  `audio/mpeg`, whatever type the provider reported. Docbank accepts no other
+  codec, so OGG/Opus, M4A and other formats stay local with the
+  `unsupported_media` code. msgvault never converts audio or runs speech
+  recognition.
+
+What happens:
+
+- Voice notes and ordinary audio both qualify when they are stored, standalone
+  Beeper attachments. Previews, stickers and other sources are skipped.
+- msgvault reads the complete transcript for that attachment from the archived
+  raw message, not the 32 KiB metadata copy. Audio without a transcript is
+  still kept by Docbank and reported as `unprocessed`.
+- The job backfills existing audio in pages of up to 100 attachments. After
+  that first scan, it checks up to 100 attachment changes each minute. It
+  starts another full scan a day after the previous scan finishes, to catch
+  transcripts that arrive later. Unchanged mappings need no write transaction.
+- Each pass performs at most one upload, transcript import, processing request,
+  or status check. A status check can make up to three HTTP requests to read
+  the job, source, and processing receipt.
+- Discovery reads, parsing, and uploads run outside the daemon's operation
+  lock. The job takes the lock for individual mapping writes and progress
+  updates. If the lock stays busy, for example during a backup, the pass ends;
+  a later pass reuses the saved operation ID. Background media work does not
+  reset the daemon's idle timer. Shutdown cancels and drains an active pass.
+- Uploads use a temporary copy under `data_dir/tmp/beeper-media`, removed when
+  the attempt ends. The current Docbank inspector also reads the complete
+  recording into memory. The default Beeper download cap is 250 MiB, and this
+  route accepts sources up to 1 GiB; memory use includes the recording plus
+  inspection and allocation overhead. These file limits are not RAM limits.
+- The same recording in several messages gets one occurrence per message.
+  Docbank stores the bytes once, and each exact transcript is processed once.
+- A hidden, source-deleted, removed or replaced message loses its mapping
+  (`revoked`), including audio still waiting to be sent. Other messages
+  sharing the audio keep theirs. Reaction changes leave the mapping live.
+  If no live or pending occurrence can supply the recording, an unstarted
+  transcript delivery stops waiting; restoring an occurrence reopens it.
+  msgvault decides which occurrences are live; Docbank keeps the shared evidence.
+- Network errors, HTTP 429 and 5xx responses retry after five minutes with the
+  same operation ID. So does a request that runs out of time: each request
+  gets 30 seconds, and an audio upload gets one more second per 256 KiB.
+  Rejected credentials or requests stay `blocked` until the daemon restarts,
+  which also resumes checking a queued job. Unsupported codecs and other
+  local source problems stay `blocked` across restarts until the message
+  changes, and so does their transcript delivery, with the same code.
+  Missing or corrupt local bytes, or a temporary upload copy that can't be
+  written, wait as `source_unavailable` and retry after five minutes.
+- A processed delivery reaches `done` only after Docbank reports coverage
+  for its own processing request, not for another transcript of the same
+  audio. A failed Docbank job or a failed processing request ends as `done`
+  with `operation_state` set to `failed`. A job marked `operator_required`
+  stays `blocked` without further polling. Resolve it in Docbank, then restart
+  the msgvault daemon to resume checking its state.
+
+Provider transcripts stay searchable through the normal message text. This
+route does not add search over Docbank's processed output yet. Check progress
+with a query:
+
+```sql
+SELECT retention_state, error_code, COUNT(*)
+FROM beeper_media_occurrences
+GROUP BY retention_state, error_code;
+
+SELECT phase, coverage_state, COUNT(*)
+FROM beeper_media_deliveries
+GROUP BY phase, coverage_state;
 ```
 
 ## Scheduled sync
