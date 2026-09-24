@@ -1513,8 +1513,6 @@ sync runs without triggering a sync.
         "messages_updated": 3,
         "errors_count": 1,
         "error_message": null,
-        "cursor_before": "745391",
-        "cursor_after": "745406",
         "skipped_count": 2,
         "item_errors": [
           {

@@ -12121,14 +12121,6 @@ components:
           type:
             - string
             - "null"
-        cursor_after:
-          type:
-            - string
-            - "null"
-        cursor_before:
-          type:
-            - string
-            - "null"
         error_message:
           type:
             - string
@@ -12173,8 +12165,6 @@ components:
         - messages_updated
         - errors_count
         - error_message
-        - cursor_before
-        - cursor_after
       type: object
     TargetDescriptor:
       additionalProperties: true

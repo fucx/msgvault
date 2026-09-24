@@ -130,8 +130,6 @@ type SyncRunStatus struct {
 	MessagesUpdated   int64               `json:"messages_updated"`
 	ErrorsCount       int64               `json:"errors_count"`
 	ErrorMessage      *string             `json:"error_message"`
-	CursorBefore      *string             `json:"cursor_before"`
-	CursorAfter       *string             `json:"cursor_after"`
 	SkippedCount      int64               `json:"skipped_count,omitzero"`
 	ItemErrors        []SyncRunItemStatus `json:"item_errors,omitempty"`
 }
@@ -1428,8 +1426,11 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sourceType := r.URL.Query().Get("source_type")
-	sources, err := statusStore.ListSources(sourceType)
+	sources, err := statusStore.ListSourcesContext(r.Context(), sourceType)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		s.logger.Error("failed to list sources for status",
 			"source_type", sourceType,
 			"error", err,
@@ -1440,8 +1441,14 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 
 	statuses := make([]SourceStatus, 0, len(sources))
 	for _, source := range sources {
-		status, err := s.sourceStatus(statusStore, source)
+		if r.Context().Err() != nil {
+			return
+		}
+		status, err := s.sourceStatus(r.Context(), statusStore, source)
 		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			s.logger.Error("failed to build source sync status",
 				"source_id", source.ID,
 				"source_type", source.SourceType,
@@ -1457,7 +1464,7 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SourceStatusResponse{Sources: statuses})
 }
 
-func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
+func (s *Server) sourceStatus(ctx context.Context, statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
 	status := SourceStatus{
 		ID:         source.ID,
 		SourceType: source.SourceType,
@@ -1471,12 +1478,12 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 		status.LastSyncAt = nullableTimePtr(source.LastSyncAt.Time)
 	}
 
-	active, err := statusStore.GetActiveSync(source.ID)
+	active, err := statusStore.GetActiveSyncReadOnly(ctx, source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get active sync: %w", err)
 	}
 	status.ActiveSync = syncRunStatus(active)
-	if err := s.hydrateSyncRunStatus(statusStore, status.ActiveSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.ActiveSync); err != nil {
 		return SourceStatus{}, err
 	}
 	scheduling := classifySourceScheduling(source.SourceType, source.Identifier)
@@ -1515,21 +1522,21 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 		status.CanSync = true
 	}
 
-	latest, err := statusStore.GetLatestSync(source.ID)
+	latest, err := statusStore.GetLatestSyncContext(ctx, source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get latest sync: %w", err)
 	}
 	status.LatestSync = syncRunStatus(latest)
-	if err := s.hydrateSyncRunStatus(statusStore, status.LatestSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.LatestSync); err != nil {
 		return SourceStatus{}, err
 	}
 
-	lastSuccessful, err := statusStore.GetLastSuccessfulSync(source.ID)
+	lastSuccessful, err := statusStore.GetLastSuccessfulSyncContext(ctx, source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get last successful sync: %w", err)
 	}
 	status.LastSuccessfulSync = syncRunStatus(lastSuccessful)
-	if err := s.hydrateSyncRunStatus(statusStore, status.LastSuccessfulSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.LastSuccessfulSync); err != nil {
 		return SourceStatus{}, err
 	}
 
@@ -1557,18 +1564,18 @@ func (s *Server) applyGenericJobStatus(status *SourceStatus, jobName string) boo
 	return false
 }
 
-func (s *Server) hydrateSyncRunStatus(statusStore SourceStatusStore, status *SyncRunStatus) error {
+func (s *Server) hydrateSyncRunStatus(ctx context.Context, statusStore SourceStatusStore, status *SyncRunStatus) error {
 	if status == nil {
 		return nil
 	}
 
-	skippedCount, err := statusStore.CountSyncRunItems(status.ID, store.SyncRunItemStatusSkipped)
+	skippedCount, err := statusStore.CountSyncRunItemsContext(ctx, status.ID, store.SyncRunItemStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("count skipped sync items: %w", err)
 	}
 	status.SkippedCount = skippedCount
 
-	items, err := statusStore.ListSyncRunItems(status.ID, store.SyncRunItemStatusError, sourceStatusItemErrorLimit)
+	items, err := statusStore.ListSyncRunItemsContext(ctx, status.ID, store.SyncRunItemStatusError, sourceStatusItemErrorLimit)
 	if err != nil {
 		return fmt.Errorf("list sync item errors: %w", err)
 	}
@@ -1596,12 +1603,6 @@ func syncRunStatus(run *store.SyncRun) *SyncRunStatus {
 	}
 	if run.ErrorMessage.Valid {
 		status.ErrorMessage = new(run.ErrorMessage.String)
-	}
-	if run.CursorBefore.Valid {
-		status.CursorBefore = new(run.CursorBefore.String)
-	}
-	if run.CursorAfter.Valid {
-		status.CursorAfter = new(run.CursorAfter.String)
 	}
 	return status
 }

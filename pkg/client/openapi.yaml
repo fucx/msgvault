@@ -11861,12 +11861,6 @@ components:
         completed_at:
           nullable: true
           type: string
-        cursor_after:
-          nullable: true
-          type: string
-        cursor_before:
-          nullable: true
-          type: string
         error_message:
           nullable: true
           type: string
@@ -11910,8 +11904,6 @@ components:
         - messages_updated
         - errors_count
         - error_message
-        - cursor_before
-        - cursor_after
       type: object
     TargetDescriptor:
       properties:

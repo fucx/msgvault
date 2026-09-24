@@ -1428,8 +1428,6 @@ func TestStoreAPIAdapterServesSourceStatus(t *testing.T) {
 	require.NotNil(got.LastSuccessfulSync, "LastSuccessfulSync")
 	assert.Equal(completedID, got.LastSuccessfulSync.ID, "LastSuccessfulSync.ID")
 	assert.Equal(store.SyncStatusCompleted, got.LastSuccessfulSync.Status, "LastSuccessfulSync.Status")
-	require.NotNil(got.LastSuccessfulSync.CursorAfter, "LastSuccessfulSync.CursorAfter")
-	assert.Equal("history-2", *got.LastSuccessfulSync.CursorAfter, "LastSuccessfulSync.CursorAfter")
 }
 
 func TestStoreAPIAdapterRunCLISyncPacksOnlyAfterSubprocessSuccess(t *testing.T) {
