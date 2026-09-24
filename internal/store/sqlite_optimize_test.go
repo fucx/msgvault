@@ -1,17 +1,249 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func plannerMaintenanceRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, record := range decodeAll(t, buf) {
+		message, _ := record["msg"].(string)
+		if message == "SQLite planner statistics maintenance interrupted" ||
+			message == "SQLite planner statistics maintenance failed" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+type plannerMaintenanceSignalHandler struct {
+	slog.Handler
+
+	interrupted chan struct{}
+	once        sync.Once
+}
+
+func (h *plannerMaintenanceSignalHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Message == "SQLite planner statistics maintenance interrupted" {
+		h.once.Do(func() { close(h.interrupted) })
+	}
+	if err := h.Handler.Handle(ctx, record); err != nil {
+		return fmt.Errorf("handle planner maintenance log: %w", err)
+	}
+	return nil
+}
+
+func TestOptimizeSQLiteCancellationLogsDebug(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	s, err := OpenForTest(filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(err)
+	t.Cleanup(func() { _ = s.Close() })
+	require.NoError(s.InitSchema())
+	s.db.SetMaxOpenConns(1)
+	s.db.SetMaxIdleConns(1)
+	blocker, err := s.db.Conn(t.Context())
+	require.NoError(err)
+	t.Cleanup(func() { _ = blocker.Close() })
+
+	buf := captureSlog(t)
+	s.optimizeSQLiteBestEffort(context.Background(), "cancellation proof")
+
+	records := plannerMaintenanceRecords(t, buf)
+	require.Len(records, 1)
+	assert.Equal("DEBUG", records[0]["level"])
+	assert.Equal("SQLite planner statistics maintenance interrupted", records[0]["msg"])
+	assert.Equal("cancellation proof", records[0]["trigger"])
+	errorText, ok := records[0]["error"].(string)
+	require.True(ok)
+	assert.Contains(errorText, "context deadline exceeded")
+}
+
+func TestPlannerMaintenanceLogLevel(t *testing.T) {
+	contextDeadlineText := errors.New("context deadline exceeded")
+	cases := []struct {
+		name      string
+		err       error
+		wantCount int
+		wantLevel string
+		wantMsg   string
+	}{
+		{name: "nil", wantCount: 0},
+		{
+			name:      "canceled",
+			err:       context.Canceled,
+			wantCount: 1,
+			wantLevel: "DEBUG",
+			wantMsg:   "SQLite planner statistics maintenance interrupted",
+		},
+		{
+			name:      "deadline exceeded",
+			err:       context.DeadlineExceeded,
+			wantCount: 1,
+			wantLevel: "DEBUG",
+			wantMsg:   "SQLite planner statistics maintenance interrupted",
+		},
+		{
+			name:      "wrapped canceled",
+			err:       fmt.Errorf("reserve connection: %w", context.Canceled),
+			wantCount: 1,
+			wantLevel: "DEBUG",
+			wantMsg:   "SQLite planner statistics maintenance interrupted",
+		},
+		{
+			name:      "wrapped deadline exceeded",
+			err:       fmt.Errorf("reserve connection: %w", context.DeadlineExceeded),
+			wantCount: 1,
+			wantLevel: "DEBUG",
+			wantMsg:   "SQLite planner statistics maintenance interrupted",
+		},
+		{
+			name:      "same text unrelated error",
+			err:       contextDeadlineText,
+			wantCount: 1,
+			wantLevel: "WARN",
+			wantMsg:   "SQLite planner statistics maintenance failed",
+		},
+		{
+			name:      "wrapped unrelated error",
+			err:       fmt.Errorf("database failure: %w", errors.New("database is closed")),
+			wantCount: 1,
+			wantLevel: "WARN",
+			wantMsg:   "SQLite planner statistics maintenance failed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureSlog(t)
+			logSQLiteOptimizeError("classifier", tc.err)
+
+			records := plannerMaintenanceRecords(t, buf)
+			require := require.New(t)
+			assert := assert.New(t)
+			require.Len(records, tc.wantCount)
+			for _, record := range records {
+				assert.Equal(tc.wantLevel, record["level"])
+				assert.Equal(tc.wantMsg, record["msg"])
+				assert.Equal("classifier", record["trigger"])
+				if tc.err != nil {
+					assert.Equal(tc.err.Error(), record["error"])
+				}
+			}
+		})
+	}
+}
+
+func TestPlannerMaintenanceDatabaseErrorWarns(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	s, err := OpenForTest(filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(err)
+	require.NoError(s.db.Close())
+	actualErr := s.optimizeSQLite(t.Context())
+	require.Error(actualErr)
+
+	buf := captureSlog(t)
+	s.optimizeSQLiteBestEffort(t.Context(), "closed database")
+
+	records := plannerMaintenanceRecords(t, buf)
+	require.Len(records, 1)
+	assert.Equal("WARN", records[0]["level"])
+	assert.Equal("SQLite planner statistics maintenance failed", records[0]["msg"])
+	assert.Equal("closed database", records[0]["trigger"])
+	assert.Equal(actualErr.Error(), records[0]["error"])
+}
+
+func TestStoreCloseDatabaseErrorWarnsAndRunsCleanup(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	s, err := OpenForTest(filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(err)
+	cleaned := false
+	s.closeCleanup = func() { cleaned = true }
+	require.NoError(s.db.Close())
+	_, actualErr := s.db.DB.ExecContext(context.Background(), "PRAGMA optimize=0x10002")
+	require.Error(actualErr)
+
+	buf := captureSlog(t)
+	closeErr := s.Close()
+	require.NoError(closeErr)
+	assert.True(cleaned)
+
+	records := plannerMaintenanceRecords(t, buf)
+	require.Len(records, 1)
+	assert.Equal("WARN", records[0]["level"])
+	assert.Equal("SQLite planner statistics maintenance failed", records[0]["msg"])
+	assert.Equal("store close", records[0]["trigger"])
+	assert.Equal(actualErr.Error(), records[0]["error"])
+}
+
+func TestStoreCloseCancellationLogsDebugAndRunsCleanup(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	s, err := OpenForTest(filepath.Join(t.TempDir(), "archive.db"))
+	require.NoError(err)
+	require.NoError(s.InitSchema())
+	s.db.SetMaxOpenConns(1)
+	s.db.SetMaxIdleConns(1)
+	blocker, err := s.db.Conn(t.Context())
+	require.NoError(err)
+	t.Cleanup(func() { _ = blocker.Close() })
+
+	cleaned := false
+	s.closeCleanup = func() { cleaned = true }
+	var buf bytes.Buffer
+	previous := slog.Default()
+	signal := &plannerMaintenanceSignalHandler{
+		Handler:     slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		interrupted: make(chan struct{}),
+	}
+	slog.SetDefault(slog.New(signal))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- s.Close() }()
+
+	select {
+	case err := <-closeDone:
+		require.FailNow("Close returned before its maintenance deadline", err)
+	case <-signal.interrupted:
+	case <-time.After(5 * time.Second):
+		require.NoError(blocker.Close())
+		<-closeDone
+		require.FailNow("Close did not log interrupted maintenance")
+	}
+	require.NoError(blocker.Close())
+	require.NoError(<-closeDone)
+
+	records := plannerMaintenanceRecords(t, &buf)
+	require.Len(records, 1)
+	assert.Equal("DEBUG", records[0]["level"])
+	assert.Equal("SQLite planner statistics maintenance interrupted", records[0]["msg"])
+	assert.Equal("store close", records[0]["trigger"])
+	assert.True(cleaned)
+	for _, record := range decodeAll(t, &buf) {
+		assert.False(record["msg"] == "sql error" && record["level"] == "WARN")
+	}
+}
 
 func messagePlannerStatisticCount(t *testing.T, s *Store) int {
 	t.Helper()
